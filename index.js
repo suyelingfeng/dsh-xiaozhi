@@ -30,7 +30,7 @@ import { join } from 'node:path'
 export const name = 'dsh-xiaozhi'
 export const inject = ['sessionController']
 
-const VERSION = '0.3.0'
+const VERSION = '0.4.0'
 const DEFAULT_PROTOCOL = '2024-11-05'
 const KEEP_SESSIONS_MS = 5000
 const SNAPSHOT_MS = 10_000
@@ -70,6 +70,8 @@ export function apply(ctx, config = {}) {
     uiSeq: 0,
     uiQueue: [], // { id, kind, args, at, consumed } — orders for the browser half
     uiWaiters: new Map(), // command id -> resolve(), settled when the browser acks it
+    uiRecent: [], // when recent UI orders were issued, for the rate limit
+    uiPending: new Map(), // sessionId -> when a switch was proposed and not confirmed
     lastSeen: new Map(), // sessionId -> { type, time, text }
     status: new Map(), // sessionId -> { status, since }
     disposed: false,
@@ -597,6 +599,16 @@ export function apply(ctx, config = {}) {
     return entry
   }
 
+  // Misheard speech must not make the window jump around, so every UI tool passes one
+  // gate: the switch is off, or there are too many orders this minute, or it goes.
+  function uiGate() {
+    if (settings.uiControl === 'off') throw new Error('界面控制被关掉了（配置 uiControl: off）。')
+    const now = Date.now()
+    state.uiRecent = state.uiRecent.filter((at) => now - at < 60_000)
+    if (state.uiRecent.length >= 10) throw new Error('这一分钟界面命令太多了，先歇一下。')
+    state.uiRecent.push(now)
+  }
+
   // Resolves { ok } when the browser acknowledges, { ok:false, error } when the shell
   // refused, or { ok:false, timeout:true } when nothing answered in time.
   function waitForUi(entry, ms = 4000) {
@@ -627,6 +639,16 @@ export function apply(ctx, config = {}) {
       calls: state.calls,
       sessions: state.sessions.length,
       active: state.active,
+      recent: [...state.sessions]
+        .filter((session) => !session.archived)
+        .sort((left, right) => right.time - left.time)
+        .slice(0, 8)
+        .map((session) => ({
+          id: session.id,
+          name: session.title !== '' ? session.title : (folderOf(session.cwd) || session.id.slice(0, 12)),
+          time: session.time,
+          running: session.running === true,
+        })),
       commands: state.uiQueue.filter((entry) => !entry.consumed && Date.now() - entry.at < 60_000).map((entry) => ({
         id: entry.id,
         kind: entry.kind,
@@ -709,14 +731,28 @@ export function apply(ctx, config = {}) {
 
   const uiMissed = (what) => `已经把「${what}」发给界面，但 4 秒内没收到确认——可能是窗口关着，或者客户端那一半没加载。`
 
+  // Switching the whole view is the one UI order a misheard sentence could make
+  // disorienting, so under the default `uiControl: confirm` it takes two calls: the first
+  // proposes the switch (and remembers it for 25s), the second carries confirm: true.
+  // Panel and sidebar only fold or unfold something, so they need no second call.
   async function uiOpenSessionText(args) {
     if (!settings.allowControl) throw new Error('在这个设置里，控制 DSH 的功能被关闭了。')
     const sessionId = await resolveSession(args.session)
     const name = await labelOf(sessionId)
+    if (settings.uiControl === 'off') throw new Error('界面控制被关掉了（配置 uiControl: off）。')
+    if (settings.uiControl === 'confirm') {
+      const proposedAt = state.uiPending.get(sessionId)
+      const fresh = proposedAt !== undefined && Date.now() - proposedAt < 25_000
+      if (args.confirm !== true || !fresh) {
+        state.uiPending.set(sessionId, Date.now())
+        return `要切到 ${name} 吗？确认的话再应我一声，我就切。`
+      }
+    }
+    state.uiPending.delete(sessionId)
+    uiGate()
     const entry = queueUi('open_session', { sessionId })
-    const said = `界面已经切到 ${name}。`
     const result = await waitForUi(entry)
-    if (result.ok) return said
+    if (result.ok) return `界面已经切到 ${name}。`
     if (result.timeout === true) return uiMissed(`打开 ${name}`)
     throw new Error(`界面没能执行：${result.error}`)
   }
@@ -727,6 +763,7 @@ export function apply(ctx, config = {}) {
     if (!['conversation', 'chat', 'xiaozhi'].includes(asked)) {
       throw new Error('panel 只能是 conversation（回到对话）或 xiaozhi（桥接面板）。')
     }
+    uiGate()
     const panel = asked === 'xiaozhi' ? 'xiaozhi' : null
     const entry = queueUi('panel', { panel })
     const what = panel === null ? '回到对话' : '打开小智桥接面板'
@@ -738,6 +775,7 @@ export function apply(ctx, config = {}) {
 
   async function uiSidebarText() {
     if (!settings.allowControl) throw new Error('在这个设置里，控制 DSH 的功能被关闭了。')
+    uiGate()
     const entry = queueUi('sidebar', {})
     const result = await waitForUi(entry)
     if (result.ok) return '已经展开/收起了左侧栏。'
@@ -944,10 +982,13 @@ export function apply(ctx, config = {}) {
     },
     {
       name: 'dsh_ui_open_session',
-      description: '把 DeepSeek Harness 的界面切到某个会话上（会顺带从别的面板回到对话视图）。session 可不填，默认最近活跃的会话。用户说「打开那个会话」「切到刚才那个」时用它。',
+      description: '把 DeepSeek Harness 的界面切到某个会话上（会顺带从别的面板回到对话视图）。session 可不填，默认最近活跃的会话。默认配置下第一次调用只会反问「要切到 X 吗」，用户确认后再调用一次并带 confirm: true 才会真的切。用户说「打开那个会话」「切到刚才那个」时用它。',
       inputSchema: {
         type: 'object',
-        properties: { session: { type: 'string', description: '会话标题的一部分或会话 ID；不填就是最近活跃的会话' } },
+        properties: {
+          session: { type: 'string', description: '会话标题的一部分或会话 ID；不填就是最近活跃的会话' },
+          confirm: { type: 'boolean', description: '用户已经确认切换时传 true。第一次调用不要传。' },
+        },
         additionalProperties: false,
       },
       run: (args) => uiOpenSessionText(args),
@@ -1431,6 +1472,7 @@ function readSettings(config) {
     allowControl: config.allowControl !== false,
     approvals: ['off', 'always', 'auto'].includes(config.approvals) ? config.approvals : 'auto',
     questions: ['off', 'always', 'auto'].includes(config.questions) ? config.questions : 'auto',
+    uiControl: ['off', 'confirm', 'all'].includes(config.uiControl) ? config.uiControl : 'confirm',
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(1000, Number(config.approvalGraceMs)) : 20_000,
     voiceWindowMs: Number.isFinite(config.voiceWindowMs) ? Math.max(60_000, Number(config.voiceWindowMs)) : 30 * 60_000,
     reconnectMinMs: Number.isFinite(config.reconnectMinMs) ? Number(config.reconnectMinMs) : 1000,

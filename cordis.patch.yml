@@ -23,5 +23,10 @@
         questions: auto
         # 等语音回答多久；超时就把请求交回 DSH 的卡片（审批卡 / 问题卡），不会丢
         approvalGraceMs: 20000
+        # 界面控制（dsh_ui_*）：
+        #   confirm —— 切会话要说两次（第一次只反问），面板/侧栏直接动
+        #   all     —— 一次就切
+        #   off     —— 三个工具全部拒绝
+        uiControl: confirm
         # 语音「算数」的时间窗：最近这么久内用语音动过 DSH（或这个会话），才先问语音
         voiceWindowMs: 1800000

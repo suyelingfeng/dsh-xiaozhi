@@ -18,3 +18,4 @@
     questions: auto
     approvalGraceMs: 20000
     voiceWindowMs: 1800000
+    uiControl: confirm     # confirm 切会话要确认；all 直接切；off 全关

@@ -266,7 +266,8 @@ const panel = async (body) => {
 }
 
 const overview = await panel({ action: 'state' })
-check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.3.0', JSON.stringify(overview.value ?? overview).slice(0, 160))
+check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.4.0', JSON.stringify(overview.value ?? overview).slice(0, 160))
+check('panel state lists recent sessions', Array.isArray(overview.value?.recent) && overview.value.recent[0]?.name === '小智测试', JSON.stringify(overview.value?.recent))
 check('panel state counts sessions', overview.value?.sessions === 2, String(overview.value?.sessions))
 
 const heldApproval = approveHandler(
@@ -317,13 +318,18 @@ const waitForFrame = async (id, ms = 3000) => {
 const pendingCommands = async () => (await panel({ action: 'state' })).value.commands ?? []
 
 fireTool(30, 'dsh_ui_open_session', { session: '小智' })
+const askFrame = await waitForFrame(30)
+check('the first switch asks before moving anything', textOf(askFrame).includes('要切到'), textOf(askFrame))
+check('nothing is queued before the confirmation', (await pendingCommands()).length === 0, JSON.stringify(await pendingCommands()))
+
+fireTool(33, 'dsh_ui_open_session', { session: '小智', confirm: true })
 await tick()
 const openOrders = await pendingCommands()
 const openOrder = openOrders.find((command) => command.kind === 'open_session')
-check('the UI order carries the resolved session', openOrder?.sessionId === 'session-a', JSON.stringify(openOrders))
+check('the confirmed order carries the resolved session', openOrder?.sessionId === 'session-a', JSON.stringify(openOrders))
 await panel({ action: 'ack', ids: [openOrder.id] })
-const openFrame = await waitForFrame(30)
-check('the UI tool reports the switch', textOf(openFrame).includes('已经切到'), textOf(openFrame))
+const openFrame = await waitForFrame(33)
+check('the confirmed switch reports back', textOf(openFrame).includes('已经切到'), textOf(openFrame))
 
 fireTool(31, 'dsh_ui_panel', { panel: 'xiaozhi' })
 await tick()

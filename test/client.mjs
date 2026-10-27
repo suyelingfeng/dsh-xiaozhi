@@ -38,6 +38,10 @@ const statePayload = {
   sessions: 2,
   approvals: [],
   questions: [],
+  recent: [
+    { id: 'session-a', name: '小智测试', time: Date.now() - 60_000, running: false },
+    { id: 'session-b', name: 'beta', time: Date.now() - 3_600_000, running: true },
+  ],
   commands: [
     { id: 7, kind: 'sidebar' },
     { id: 8, kind: 'open_session', sessionId: 'session-a' },
@@ -130,6 +134,20 @@ check('the panel has a title', panelText.includes('小智语音桥接'), panelTe
 check('the panel lists both waiting sections', panelText.includes('等你批准') && panelText.includes('等你回答'), panelText)
 check('the panel explains where config lives', panelText.includes('cordis.patch.yml'), panelText)
 check('the panel shows the live status', panelText.includes('已连接') && panelText.includes('2024-11-05'), panelText)
+
+// The recent list is the panel's own way to switch sessions: a click goes straight to
+// the shell, with no confirmation and no poll delay.
+check('the panel lists recent sessions', panelText.includes('最近会话') && panelText.includes('小智测试') && panelText.includes('beta'), panelText)
+const nodesOf = (node, out = []) => {
+  if (node === null || node === undefined) return out
+  if (Array.isArray(node)) { for (const item of node) nodesOf(item, out); return out }
+  if (typeof node === 'object') { out.push(node); nodesOf(node.children, out) }
+  return out
+}
+const rowFor = (value) => nodesOf(panel).find((element) => typeof element.props?.onClick === 'function'
+  && (element.children ?? []).some((child) => child?.children?.[0] === value))
+rowFor('beta')?.props?.onClick?.()
+check('clicking a session row opens it', workspace.opened === 'session-b' && layout.panel === null, `${workspace.opened} / ${layout.panel}`)
 
 // Get at a rendered element by the text it shows, then press it.
 const nodes = (node, out = []) => {

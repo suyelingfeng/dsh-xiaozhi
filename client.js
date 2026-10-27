@@ -195,6 +195,34 @@ window.__ModuleLoader__.load({
 
     const waiting = (data) => (data?.approvals?.length ?? 0) + (data?.questions?.length ?? 0)
 
+    const ago = (time) => {
+      if (typeof time !== 'number' || !Number.isFinite(time) || time <= 0) return ''
+      const seconds = Math.max(0, Math.round((Date.now() - time) / 1000))
+      if (seconds < 60) return '刚刚'
+      if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`
+      if (seconds < 86400) return `${Math.round(seconds / 3600)} 小时前`
+      return `${Math.round(seconds / 86400)} 天前`
+    }
+
+    // The panel's own session rows go straight to the shell: the person clicked them, so
+    // there is nothing to confirm, and skipping the queue means no poll-interval delay.
+    function switchSession(ctx, sessionId) {
+      const workspace = ctx.get?.('uiWorkspace')
+      const layout = ctx.get?.('layout')
+      if (typeof workspace?.openSession !== 'function') {
+        store.error = 'this shell has no uiWorkspace.openSession'
+        emit()
+        return
+      }
+      try {
+        workspace.openSession(sessionId)
+        if (typeof layout?.selectPanel === 'function') layout.selectPanel(null)
+      } catch (failure) {
+        store.error = String(failure?.message ?? failure)
+        emit()
+      }
+    }
+
     // ── the bottom bar: always visible, opens the panel ──────────────────────
 
     function makeBar(ctx) {
@@ -266,6 +294,23 @@ window.__ModuleLoader__.load({
                 ),
                 data.lastError === '' ? null : h('div', { style: { ...mono, marginTop: 6, color: 'var(--dsw-danger, #d1242f)' } }, data.lastError),
                 h('div', { style: { ...muted, ...mono, marginTop: 6 } }, `插件 ${data.version} · 进程 ${data.pid} · 会话 ${data.sessions} 个`),
+              ),
+
+          h('h3', { style: { fontSize: 15, margin: '18px 0 4px' } }, '最近会话'),
+          (data?.recent?.length ?? 0) === 0
+            ? h('p', { style: muted }, '读取中…')
+            : data.recent.map((session) =>
+                h('div', {
+                  key: session.id,
+                  role: 'button',
+                  title: '切到这个会话',
+                  onClick: () => switchSession(ctx, session.id),
+                  style: { ...row, ...card, cursor: 'pointer', margin: '6px 0' },
+                },
+                  h('span', { style: dot(session.running) }),
+                  h('span', null, session.name),
+                  h('span', { style: { ...muted, marginLeft: 'auto' } }, ago(session.time)),
+                ),
               ),
 
           h('h3', { style: { fontSize: 15, margin: '18px 0 4px' } }, `等你批准（${data?.approvals?.length ?? 0}）`),
