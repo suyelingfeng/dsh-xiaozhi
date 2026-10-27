@@ -1,5 +1,6 @@
-// The browser half of dsh-xiaozhi: a status bar across the bottom of the app and a
-// panel it opens, both driven by the host half over one POST route.
+// The browser half of dsh-xiaozhi: a status bar across the bottom of the app, a panel it
+// opens, and the executor for the host's UI orders (open a Session, switch a panel,
+// toggle the sidebar).
 //
 // Hand-written rather than built: the module system takes a lazy CJS factory whose
 // `require` resolves against the shell's shared module table (react, and the client
@@ -20,7 +21,7 @@ window.__ModuleLoader__.load({
 
     const ROUTE = 'api/xiaozhi'
     const PANEL = 'xiaozhi'
-    const POLL_MS = 3000
+    const POLL_MS = 2000
 
     // ── host calls ───────────────────────────────────────────────────────────
 
@@ -39,6 +40,117 @@ window.__ModuleLoader__.load({
       }
       if (!payload || payload.ok !== true) throw new Error(payload?.error?.message ?? `HTTP ${response.status}`)
       return payload.value
+    }
+
+    // ── the UI orders the host queues for us ─────────────────────────────────
+
+    let clientCtx
+    const executed = new Set()
+
+    function runCommand(command) {
+      const layout = clientCtx?.get?.('layout')
+      if (command.kind === 'open_session') {
+        const workspace = clientCtx?.get?.('uiWorkspace')
+        if (typeof workspace?.openSession !== 'function') throw new Error('this shell has no uiWorkspace.openSession')
+        workspace.openSession(command.sessionId)
+        return
+      }
+      if (command.kind === 'panel') {
+        if (typeof layout?.selectPanel !== 'function') throw new Error('this shell has no layout.selectPanel')
+        layout.selectPanel(command.panel ?? null)
+        return
+      }
+      if (command.kind === 'sidebar') {
+        if (typeof layout?.toggleSidebar !== 'function') throw new Error('this shell has no layout.toggleSidebar')
+        layout.toggleSidebar()
+        return
+      }
+      throw new Error(`unknown UI order: ${String(command.kind)}`)
+    }
+
+    // ── one poller for the whole page ─────────────────────────────────────────
+    //
+    // The bar is always mounted, so the poller lives as long as the page: orders are
+    // executed even while the panel is closed. Components subscribe to this snapshot
+    // instead of fetching on their own.
+
+    const store = {
+      data: null,
+      error: '',
+      busy: false,
+      listeners: new Set(),
+      timer: undefined,
+      running: false,
+    }
+
+    const snapshot = () => ({ data: store.data, error: store.error, busy: store.busy })
+    const emit = () => {
+      const next = snapshot()
+      for (const listener of store.listeners) listener(next)
+    }
+
+    async function tick() {
+      if (store.running) return
+      store.running = true
+      try {
+        const next = await host('state')
+        const commands = Array.isArray(next?.commands) ? next.commands : []
+        const fresh = commands.filter((command) => !executed.has(command.id))
+        const errors = {}
+        for (const command of fresh) {
+          executed.add(command.id)
+          try {
+            runCommand(command)
+          } catch (failure) {
+            // A bad order is acknowledged with its reason, so the host can tell the
+            // caller what the shell refused instead of just "no answer".
+            errors[command.id] = String(failure?.message ?? failure)
+          }
+        }
+        for (const id of executed) {
+          if (!commands.some((command) => command.id === id)) executed.delete(id)
+        }
+        if (fresh.length > 0) void host('ack', { ids: fresh.map((command) => command.id), errors }).catch(() => {})
+        store.data = next
+        store.error = ''
+      } catch (failure) {
+        store.error = String(failure?.message ?? failure)
+      } finally {
+        store.running = false
+        emit()
+      }
+    }
+
+    function startPolling() {
+      if (store.timer !== undefined) return
+      void tick()
+      store.timer = setInterval(() => { void tick() }, POLL_MS)
+    }
+
+    function useBridge() {
+      const [state, setState] = React.useState(snapshot)
+      React.useEffect(() => {
+        const listener = (next) => setState(next)
+        store.listeners.add(listener)
+        startPolling()
+        return () => {
+          store.listeners.delete(listener)
+        }
+      }, [])
+      const run = React.useCallback(async (action, rest) => {
+        store.busy = true
+        emit()
+        try {
+          await host(action, rest)
+          store.error = ''
+        } catch (failure) {
+          store.error = String(failure?.message ?? failure)
+        } finally {
+          store.busy = false
+          await tick()
+        }
+      }, [])
+      return { data: state.data, error: state.error, busy: state.busy, load: () => { void tick() }, run }
     }
 
     // ── styles (theme-agnostic: inherit colours, fall back when a token is absent) ──
@@ -79,40 +191,6 @@ window.__ModuleLoader__.load({
       background: 'transparent',
       color: 'inherit',
       font: 'inherit',
-    }
-
-    // ── data ─────────────────────────────────────────────────────────────────
-
-    function useBridge() {
-      const [data, setData] = React.useState(null)
-      const [error, setError] = React.useState('')
-      const [busy, setBusy] = React.useState(false)
-      const load = React.useCallback(() => {
-        host('state')
-          .then((next) => {
-            setData(next)
-            setError('')
-          })
-          .catch((failure) => setError(String(failure?.message ?? failure)))
-      }, [])
-      React.useEffect(() => {
-        load()
-        const timer = setInterval(load, POLL_MS)
-        return () => clearInterval(timer)
-      }, [load])
-      const run = React.useCallback(async (action, rest) => {
-        setBusy(true)
-        try {
-          await host(action, rest)
-          setError('')
-        } catch (failure) {
-          setError(String(failure?.message ?? failure))
-        } finally {
-          setBusy(false)
-          load()
-        }
-      }, [load])
-      return { data, error, busy, load, run }
     }
 
     const waiting = (data) => (data?.approvals?.length ?? 0) + (data?.questions?.length ?? 0)
@@ -254,7 +332,9 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
 
     function apply(ctx) {
+      clientCtx = ctx
       // A slim bar across the bottom: the only always-visible seat, and the way in.
+      // It also keeps the poller (and therefore the order queue) alive.
       ctx.slots.inject('shell.bottom', () =>
         ctx.slots.register({ name: 'shell.bottom', key: 'xiaozhi-bridge' }, makeBar(ctx)),
       )

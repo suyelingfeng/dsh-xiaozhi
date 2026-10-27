@@ -1,32 +1,65 @@
 // Offline test for the browser half: load the bundle the way the shell's module system
-// does, then execute the registered components with a stub React. It cannot prove the
-// panel *looks* right, but it proves the bundle loads, registers the two seats, and
-// renders without touching anything it should not.
+// does, then render it with a stub React and a stub fetch. It cannot prove the panel
+// *looks* right, but it proves the bundle loads, registers its two seats, renders, and
+// executes the host's UI orders — the part that used to be untestable.
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
-
-const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 
 const results = []
 const check = (name, ok, detail = '') => {
   results.push({ name, ok })
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || detail === '' ? '' : ` — ${detail}`}`)
 }
+const settle = () => new Promise((resolve) => setTimeout(resolve, 80))
 
-// A React small enough to run the components once: hooks return their initial value.
+const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+
+// A React small enough to run each component once: hooks return their initial value,
+// effects run inline (which is what starts the poller), state changes do nothing.
 const React = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
-  useEffect: () => {},
+  useEffect: (fn) => { fn() },
   useCallback: (fn) => fn,
   Fragment: 'Fragment',
+}
+
+// The host answers `state` with two queued orders, and records the ack it gets back.
+const calls = []
+const statePayload = {
+  version: '0.2.2',
+  pid: 1,
+  connected: true,
+  protocol: '2024-11-05',
+  reconnects: 0,
+  lastError: '',
+  endpointSource: 'file',
+  calls: 3,
+  sessions: 2,
+  approvals: [],
+  questions: [],
+  commands: [
+    { id: 7, kind: 'sidebar' },
+    { id: 8, kind: 'open_session', sessionId: 'session-a' },
+  ],
+}
+const fetchStub = async (url, options) => {
+  const body = JSON.parse(options.body)
+  calls.push({ url, body })
+  const value = body.action === 'state' ? statePayload : { acked: body.ids?.length ?? 0 }
+  return { status: 200, json: async () => ({ ok: true, value }) }
 }
 
 let loaded
 const sandbox = {
   window: { __ModuleLoader__: { load: (mod) => { loaded = mod } } },
   console,
-  fetch: async () => { throw new Error('offline') },
+  fetch: fetchStub,
+  // The browser globals the bundle uses for its poller.
+  setInterval,
+  clearInterval,
+  setTimeout,
+  clearTimeout,
 }
 vm.runInNewContext(source, sandbox, { filename: 'client.js' })
 
@@ -40,7 +73,14 @@ check('it exports a client plugin', typeof plugin.apply === 'function' && Array.
 check('it only injects what it needs', JSON.stringify(plugin.inject) === '["slots"]', JSON.stringify(plugin.inject))
 
 const registered = []
-const layout = { panel: undefined, selectPanel(id) { this.panel = id } }
+const layout = {
+  panel: undefined,
+  toggles: 0,
+  selectPanel(id) { this.panel = id },
+  toggleSidebar() { this.toggles += 1 },
+}
+const workspace = { opened: undefined, openSession(id) { this.opened = id } }
+const services = { layout, uiWorkspace: workspace }
 const slots = {
   inject: (name, callback) => callback(),
   register: (meta, component) => {
@@ -48,7 +88,7 @@ const slots = {
     return () => {}
   },
 }
-plugin.apply({ slots, get: (name) => (name === 'layout' ? layout : undefined) })
+plugin.apply({ slots, get: (name) => services[name] })
 
 check('it takes two seats', registered.length === 2, JSON.stringify(registered.map((entry) => entry.meta.name)))
 check('the bar lives in shell.bottom', registered[0]?.meta?.name === 'shell.bottom', JSON.stringify(registered[0]?.meta))
@@ -66,11 +106,21 @@ const textOf = (node) => {
   return out.join(' ')
 }
 
+// Rendering the bar starts the page's single poller, which drains the order queue.
 const bar = registered[0].component({})
+await settle()
+
+check('the order queue toggles the sidebar', layout.toggles === 1, String(layout.toggles))
+check('the order queue opens the session', workspace.opened === 'session-a', String(workspace.opened))
+const ack = calls.find((entry) => entry.body.action === 'ack')
+check('the orders are acknowledged', ack !== undefined && JSON.stringify(ack.body.ids) === '[7,8]', JSON.stringify(ack?.body))
+
 const barText = textOf(bar)
 check('the bar names the bridge', barText.includes('小智桥接'), barText)
 const barDot = (bar.children ?? []).find((child) => child?.props?.style?.borderRadius === 4)
 check('the bar carries a status dot', barDot !== undefined && String(barDot.props.style.background).includes('--dsw-'), JSON.stringify(barDot?.props?.style))
+
+layout.panel = undefined
 bar.props.onClick()
 check('clicking the bar opens the panel', layout.panel === 'xiaozhi', String(layout.panel))
 
@@ -79,6 +129,7 @@ const panelText = textOf(panel)
 check('the panel has a title', panelText.includes('小智语音桥接'), panelText)
 check('the panel lists both waiting sections', panelText.includes('等你批准') && panelText.includes('等你回答'), panelText)
 check('the panel explains where config lives', panelText.includes('cordis.patch.yml'), panelText)
+check('the panel shows the live status', panelText.includes('已连接') && panelText.includes('2024-11-05'), panelText)
 
 // Get at a rendered element by the text it shows, then press it.
 const nodes = (node, out = []) => {

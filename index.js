@@ -30,7 +30,7 @@ import { join } from 'node:path'
 export const name = 'dsh-xiaozhi'
 export const inject = ['sessionController']
 
-const VERSION = '0.2.2'
+const VERSION = '0.3.0'
 const DEFAULT_PROTOCOL = '2024-11-05'
 const KEEP_SESSIONS_MS = 5000
 const SNAPSHOT_MS = 10_000
@@ -67,6 +67,9 @@ export function apply(ctx, config = {}) {
     voiceSessions: new Map(), // sessionId -> when voice last drove it
     approvals: new Map(), // id -> { id, sessionId, tool, reason, at, state, answer? }
     questions: new Map(), // id -> { id, sessionId, callId, questions, at, state, answer? }
+    uiSeq: 0,
+    uiQueue: [], // { id, kind, args, at, consumed } — orders for the browser half
+    uiWaiters: new Map(), // command id -> resolve(), settled when the browser acks it
     lastSeen: new Map(), // sessionId -> { type, time, text }
     status: new Map(), // sessionId -> { status, since }
     disposed: false,
@@ -577,6 +580,40 @@ export function apply(ctx, config = {}) {
   // desktop shell carries over its IPC bridge. The client half calls it with a relative
   // URL; nothing here is reachable without that browser session.
 
+  // ── UI commands: the host queues, the client half polls and executes ────────
+  //
+  // There is no host→browser push channel a third-party plugin can join (forwarded
+  // events are an app-assembly decision), so the queue rides the same 2s state poll the
+  // panel already does. The client acknowledges each command, which turns "sent" into
+  // "the UI actually did it" for the tool's answer.
+
+  function queueUi(kind, args) {
+    state.uiSeq += 1
+    const entry = { id: state.uiSeq, kind, args, at: Date.now(), consumed: false }
+    state.uiQueue.push(entry)
+    // Keep the tail short: a browser that has been closed for an hour should not replay
+    // a hundred stale orders when it comes back.
+    while (state.uiQueue.length > 20) state.uiQueue.shift()
+    return entry
+  }
+
+  // Resolves { ok } when the browser acknowledges, { ok:false, error } when the shell
+  // refused, or { ok:false, timeout:true } when nothing answered in time.
+  function waitForUi(entry, ms = 4000) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        state.uiWaiters.delete(entry.id)
+        resolve({ ok: false, timeout: true })
+      }, ms)
+      timer.unref?.()
+      state.uiWaiters.set(entry.id, (result) => {
+        clearTimeout(timer)
+        state.uiWaiters.delete(entry.id)
+        resolve(result)
+      })
+    })
+  }
+
   function panelState() {
     return {
       version: VERSION,
@@ -590,6 +627,11 @@ export function apply(ctx, config = {}) {
       calls: state.calls,
       sessions: state.sessions.length,
       active: state.active,
+      commands: state.uiQueue.filter((entry) => !entry.consumed && Date.now() - entry.at < 60_000).map((entry) => ({
+        id: entry.id,
+        kind: entry.kind,
+        ...entry.args,
+      })),
       approvals: [...state.approvals.values()]
         .filter((entry) => entry.answer !== undefined)
         .map((entry) => ({ id: entry.id.slice(0, 8), tool: entry.tool, reason: entry.reason, session: entry.sessionId })),
@@ -648,7 +690,59 @@ export function apply(ctx, config = {}) {
       void listSessions(true).catch(() => {})
       return panelOk(panelState())
     }
+    if (action === 'ack') {
+      const ids = Array.isArray(body?.ids) ? body.ids : []
+      const errors = body?.errors !== null && typeof body?.errors === 'object' ? body.errors : {}
+      for (const id of ids) {
+        const entry = state.uiQueue.find((item) => item.id === Number(id))
+        if (entry === undefined || entry.consumed) continue
+        entry.consumed = true
+        const failed = errors[String(entry.id)]
+        state.uiWaiters.get(entry.id)?.(failed === undefined ? { ok: true } : { ok: false, error: String(failed) })
+      }
+      return panelOk({ acked: ids.length })
+    }
     return panelFail(`unknown action ${action}`)
+  }
+
+  // ── UI tools: queue an order and wait for the browser to say it did it ──────
+
+  const uiMissed = (what) => `已经把「${what}」发给界面，但 4 秒内没收到确认——可能是窗口关着，或者客户端那一半没加载。`
+
+  async function uiOpenSessionText(args) {
+    if (!settings.allowControl) throw new Error('在这个设置里，控制 DSH 的功能被关闭了。')
+    const sessionId = await resolveSession(args.session)
+    const name = await labelOf(sessionId)
+    const entry = queueUi('open_session', { sessionId })
+    const said = `界面已经切到 ${name}。`
+    const result = await waitForUi(entry)
+    if (result.ok) return said
+    if (result.timeout === true) return uiMissed(`打开 ${name}`)
+    throw new Error(`界面没能执行：${result.error}`)
+  }
+
+  async function uiPanelText(args) {
+    if (!settings.allowControl) throw new Error('在这个设置里，控制 DSH 的功能被关闭了。')
+    const asked = String(args.panel ?? 'conversation').trim().toLowerCase()
+    if (!['conversation', 'chat', 'xiaozhi'].includes(asked)) {
+      throw new Error('panel 只能是 conversation（回到对话）或 xiaozhi（桥接面板）。')
+    }
+    const panel = asked === 'xiaozhi' ? 'xiaozhi' : null
+    const entry = queueUi('panel', { panel })
+    const what = panel === null ? '回到对话' : '打开小智桥接面板'
+    const result = await waitForUi(entry)
+    if (result.ok) return `界面已经${what}。`
+    if (result.timeout === true) return uiMissed(what)
+    throw new Error(`界面没能执行：${result.error}`)
+  }
+
+  async function uiSidebarText() {
+    if (!settings.allowControl) throw new Error('在这个设置里，控制 DSH 的功能被关闭了。')
+    const entry = queueUi('sidebar', {})
+    const result = await waitForUi(entry)
+    if (result.ok) return '已经展开/收起了左侧栏。'
+    if (result.timeout === true) return uiMissed('切换左侧栏')
+    throw new Error(`界面没能执行：${result.error}`)
   }
 
   async function jobsText(args) {
@@ -847,6 +941,33 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
       },
       run: (args) => newChatText(args),
+    },
+    {
+      name: 'dsh_ui_open_session',
+      description: '把 DeepSeek Harness 的界面切到某个会话上（会顺带从别的面板回到对话视图）。session 可不填，默认最近活跃的会话。用户说「打开那个会话」「切到刚才那个」时用它。',
+      inputSchema: {
+        type: 'object',
+        properties: { session: { type: 'string', description: '会话标题的一部分或会话 ID；不填就是最近活跃的会话' } },
+        additionalProperties: false,
+      },
+      run: (args) => uiOpenSessionText(args),
+    },
+    {
+      name: 'dsh_ui_panel',
+      description: '切换 DeepSeek Harness 界面的主面板。panel 为 conversation 时回到对话，为 xiaozhi 时打开小智桥接面板（连接状态、待批、待答）。用户说「回到对话」「打开桥接面板」时用它。',
+      inputSchema: {
+        type: 'object',
+        properties: { panel: { type: 'string', enum: ['conversation', 'xiaozhi'], description: 'conversation 回到对话；xiaozhi 打开桥接面板' } },
+        required: ['panel'],
+        additionalProperties: false,
+      },
+      run: (args) => uiPanelText(args),
+    },
+    {
+      name: 'dsh_ui_sidebar',
+      description: '展开或收起 DeepSeek Harness 的左侧栏。用户说「收起侧栏」「把左边打开」时用它。',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: () => uiSidebarText(),
     },
     {
       name: 'dsh_diagnostics',

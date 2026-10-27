@@ -120,8 +120,8 @@ check('initialize names the server', init?.result?.serverInfo?.name === 'deepsee
 const list = await send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
 const tools = list?.result?.tools ?? []
 const names = tools.map((tool) => tool.name).sort()
-check('tools/list returns every tool', tools.length === 11, JSON.stringify(names))
-check('tool names are the expected ones', ['dsh_diagnostics', 'dsh_list_chats', 'dsh_read_conversation', 'dsh_send_message', 'dsh_status', 'dsh_stop', 'dsh_pending', 'dsh_answer', 'dsh_jobs', 'dsh_job_kill', 'dsh_new_chat'].every((name) => names.includes(name)), JSON.stringify(names))
+check('tools/list returns every tool', tools.length === 14, JSON.stringify(names))
+check('tool names are the expected ones', ['dsh_diagnostics', 'dsh_list_chats', 'dsh_read_conversation', 'dsh_send_message', 'dsh_status', 'dsh_stop', 'dsh_pending', 'dsh_answer', 'dsh_jobs', 'dsh_job_kill', 'dsh_new_chat', 'dsh_ui_open_session', 'dsh_ui_panel', 'dsh_ui_sidebar'].every((name) => names.includes(name)), JSON.stringify(names))
 check('every tool has an input schema', tools.every((tool) => tool.inputSchema?.type === 'object'))
 check('no handler leaks into the schema', tools.every((tool) => tool.run === undefined))
 
@@ -266,7 +266,7 @@ const panel = async (body) => {
 }
 
 const overview = await panel({ action: 'state' })
-check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.2.2', JSON.stringify(overview.value ?? overview).slice(0, 160))
+check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.3.0', JSON.stringify(overview.value ?? overview).slice(0, 160))
 check('panel state counts sessions', overview.value?.sessions === 2, String(overview.value?.sessions))
 
 const heldApproval = approveHandler(
@@ -298,6 +298,46 @@ check('panel refuses a stale id', stale.ok === false && stale.error?.code === 'x
 
 const unknown = await panel({ action: 'nope' })
 check('panel refuses an unknown action', unknown.ok === false, JSON.stringify(unknown))
+
+// ── UI orders: the tool queues one and waits for the browser's ack ───────────
+
+const fireTool = (id, name, args) => {
+  socket.sent.length = 0
+  socket.emit('message', { data: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args ?? {} } }) })
+}
+const waitForFrame = async (id, ms = 3000) => {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    const hit = socket.sent.find((frame) => frame.id === id)
+    if (hit !== undefined) return hit
+    await tick()
+  }
+  return undefined
+}
+const pendingCommands = async () => (await panel({ action: 'state' })).value.commands ?? []
+
+fireTool(30, 'dsh_ui_open_session', { session: '小智' })
+await tick()
+const openOrders = await pendingCommands()
+const openOrder = openOrders.find((command) => command.kind === 'open_session')
+check('the UI order carries the resolved session', openOrder?.sessionId === 'session-a', JSON.stringify(openOrders))
+await panel({ action: 'ack', ids: [openOrder.id] })
+const openFrame = await waitForFrame(30)
+check('the UI tool reports the switch', textOf(openFrame).includes('已经切到'), textOf(openFrame))
+
+fireTool(31, 'dsh_ui_panel', { panel: 'xiaozhi' })
+await tick()
+const panelOrder = (await pendingCommands()).find((command) => command.kind === 'panel')
+check('the panel order names the panel', panelOrder?.panel === 'xiaozhi', JSON.stringify(panelOrder))
+await panel({ action: 'ack', ids: [panelOrder.id] })
+check('the panel tool reports the switch', textOf(await waitForFrame(31)).includes('打开小智桥接面板'), textOf(await waitForFrame(31)))
+
+fireTool(32, 'dsh_ui_sidebar')
+await tick()
+const sideOrder = (await pendingCommands()).find((command) => command.kind === 'sidebar')
+await panel({ action: 'ack', ids: [sideOrder.id], errors: { [sideOrder.id]: 'this shell has no layout.toggleSidebar' } })
+const sideFrame = await waitForFrame(32)
+check('a refused order is reported, not swallowed', textOf(sideFrame).includes('界面没能执行'), textOf(sideFrame))
 
 const reconnect = await panel({ action: 'reconnect' })
 check('panel reconnect is accepted', reconnect.ok === true, JSON.stringify(reconnect.error ?? ''))

@@ -1,6 +1,6 @@
 {
   "name": "dsh-xiaozhi",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Bridge DeepSeek Harness to a XiaoZhi (小智) MCP endpoint over WebSocket: 小智 can read DSH conversations and control what DSH is doing",
   "license": "Apache-2.0",
   "type": "module",
