@@ -3,6 +3,15 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的写法，
 版本号按 [SemVer](https://semver.org/lang/zh-CN/) 走：插件版本随 DSH 内部的接口变化而跳。
 
+## [Unreleased]
+
+### 文档
+
+- 补上整套链路的图示与设备端的引用：设备固件
+  [progyuan/xiaozhi-esp32-ai-robot](https://github.com/progyuan/xiaozhi-esp32-ai-robot)
+  （`78/xiaozhi-esp32` 的 fork，MIT）；说明设备只连小智云、不直连 DSH，**固件侧无需为本插件改动**。
+- README 增加「它在链路里的位置」与「相关项目」两节。
+
 ## [0.2.2] - 2026-10-27
 
 ### 新增

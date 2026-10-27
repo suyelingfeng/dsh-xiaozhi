@@ -6,6 +6,30 @@
 > 一个 DSH 插件。跑在 DSH 主进程里，直接调用 DSH 自己的会话控制器与审批/提问水位事件——
 > 不是另一个 harness，也不需要抓 DSH 的 HTTP 令牌。
 
+## 它在链路里的位置
+
+```
+小智设备（ESP32 固件）── WebSocket / MQTT+UDP ──▶ 小智云（智能体 + LLM）
+                                                    │
+                                        MCP 接入点（wss + token）
+                                                    │  ◀── 本插件作为 MCP 服务端连出去
+                                                    ▼
+                                          DeepSeek Harness（本机）
+```
+
+设备只和云说话，**不直连 DSH**。所以换设备、换固件都不影响本插件，只要那条接入点的 token 还在；
+固件侧也不需要为本插件改任何东西——它要的只是 Wi-Fi 配网，以及（自建服务端时）OTA / WebSocket 地址。
+
+## 相关项目
+
+| 项目 | 关系 |
+|---|---|
+| [progyuan/xiaozhi-esp32-ai-robot](https://github.com/progyuan/xiaozhi-esp32-ai-robot) | 设备端固件（小智 AI 机器人），MIT 许可；`78/xiaozhi-esp32` 的 fork |
+| [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) | 上游固件项目，MIT（Copyright © 2024 Xiaoxia） |
+| [xiaozhi.me](https://xiaozhi.me/) | 小智云、控制台与 MCP 接入点 |
+
+本仓库只做云端之后的这一半（MCP 服务端 → DSH）。固件的功能、编译与烧录请走上面两个仓库的文档。
+
 ## 快速开始
 
 ```sh
