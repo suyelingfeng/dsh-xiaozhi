@@ -11,7 +11,12 @@
       config:
         # wss://api.xiaozhi.me/mcp/?token=…  —— 小智控制台 → 智能体 → MCP 接入点
         # 空 = 去 ~/.dsh/xiaozhi/endpoint 读；那里也没有就不连接，只写状态文件
+        # 面板里也能改（写的就是那个文件），改完立刻重连，不用重启。
         endpoint: ""
+        # 面板改地址时接受哪些主机：
+        #   xiaozhi —— 只接受 api.xiaozhi.me（默认）
+        #   any     —— 任意主机（自建小智服务端时才用）
+        endpointPolicy: xiaozhi
         # false 只读：只允许看状态/会话/对话，不允许发消息、停止、批审批、开新会话
         allowControl: true
 

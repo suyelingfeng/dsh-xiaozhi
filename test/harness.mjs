@@ -1,6 +1,6 @@
 // Offline smoke test: a fake WebSocket plays the XiaoZhi broker, a fake ctx plays
 // the DSH host. No network, no DSH, no writes outside .test-home.
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -266,7 +266,7 @@ const panel = async (body) => {
 }
 
 const overview = await panel({ action: 'state' })
-check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.4.0', JSON.stringify(overview.value ?? overview).slice(0, 160))
+check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.5.0', JSON.stringify(overview.value ?? overview).slice(0, 160))
 check('panel state lists recent sessions', Array.isArray(overview.value?.recent) && overview.value.recent[0]?.name === '小智测试', JSON.stringify(overview.value?.recent))
 check('panel state counts sessions', overview.value?.sessions === 2, String(overview.value?.sessions))
 
@@ -347,6 +347,33 @@ check('a refused order is reported, not swallowed', textOf(sideFrame).includes('
 
 const reconnect = await panel({ action: 'reconnect' })
 check('panel reconnect is accepted', reconnect.ok === true, JSON.stringify(reconnect.error ?? ''))
+
+// ── changing the address from the panel ─────────────────────────────────────
+// The address is the identity, so the route only takes the XiaoZhi service unless the
+// profile relaxes it, and it never sends the token back.
+
+const otherHost = await panel({ action: 'set_endpoint', endpoint: 'wss://evil.example/mcp/?token=abc' })
+check('the panel refuses another host', otherHost.ok === false && String(otherHost.error?.message).includes('api.xiaozhi.me'), JSON.stringify(otherHost.error))
+
+const noToken = await panel({ action: 'set_endpoint', endpoint: 'wss://api.xiaozhi.me/mcp/' })
+check('the panel refuses an address without a token', noToken.ok === false && String(noToken.error?.message).includes('token'), JSON.stringify(noToken.error))
+
+const badScheme = await panel({ action: 'set_endpoint', endpoint: 'http://api.xiaozhi.me/mcp/?token=abc' })
+check('the panel refuses a non-websocket address', badScheme.ok === false, JSON.stringify(badScheme.error))
+
+// The reconnect wait uses unref'd timers (right for a host that is shutting down), so the
+// test keeps the loop alive while it waits.
+const keepAlive = setInterval(() => {}, 200)
+const saving = panel({ action: 'set_endpoint', endpoint: 'wss://api.xiaozhi.me/mcp/?token=fake-token' })
+await tick()
+FakeSocket.last?.emit('open', {})
+const saved = await saving
+clearInterval(keepAlive)
+check('the panel saves a new address', saved.ok === true && saved.value.host === 'api.xiaozhi.me', JSON.stringify(saved).slice(0, 200))
+const written = readFileSync(join(process.env.DSH_HOME, 'xiaozhi', 'endpoint'), 'utf8')
+check('the address lands in the local file', written.includes('token=fake-token') && written.startsWith('#'), written.split('\n')[1]?.slice(0, 40))
+check('the saved address reconnects', saved.value.connected === true, JSON.stringify(saved.value.lastError ?? ''))
+check('the state reports where the address came from', saved.value.endpointSource === 'file' && saved.value.endpointHost === 'api.xiaozhi.me', `${saved.value.endpointSource} / ${saved.value.endpointHost}`)
 
 const failed = results.filter((result) => !result.ok)
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`)

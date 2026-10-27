@@ -23,14 +23,14 @@
 // 宿主API笔记. Tests: `node test/harness.mjs` (offline) and `node test/live.mjs`.
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 export const name = 'dsh-xiaozhi'
 export const inject = ['sessionController']
 
-const VERSION = '0.4.0'
+const VERSION = '0.5.0'
 const DEFAULT_PROTOCOL = '2024-11-05'
 const KEEP_SESSIONS_MS = 5000
 const SNAPSHOT_MS = 10_000
@@ -636,6 +636,13 @@ export function apply(ctx, config = {}) {
       reconnects: state.reconnects,
       lastError: state.lastError,
       endpointSource: state.endpointSource,
+      endpointHost: (() => {
+        try {
+          return settings.endpoint === '' ? '' : new URL(settings.endpoint).hostname
+        } catch {
+          return ''
+        }
+      })(),
       calls: state.calls,
       sessions: state.sessions.length,
       active: state.active,
@@ -723,6 +730,32 @@ export function apply(ctx, config = {}) {
         state.uiWaiters.get(entry.id)?.(failed === undefined ? { ok: true } : { ok: false, error: String(failed) })
       }
       return panelOk({ acked: ids.length })
+    }
+    if (action === 'set_endpoint') {
+      const wasFromConfig = state.endpointSource === 'config'
+      let parsed
+      try {
+        parsed = parseEndpoint(body?.endpoint)
+      } catch (error) {
+        return panelFail(String(error?.message ?? error))
+      }
+      try {
+        await writeEndpointFile(parsed.url)
+      } catch (error) {
+        return panelFail(`写不进 ${join(stateDir, 'endpoint')}：${error?.message ?? error}`)
+      }
+      settings.endpoint = parsed.url
+      state.endpointSource = 'file'
+      state.lastError = ''
+      restartSocket()
+      await waitConnected(6000)
+      return panelOk({
+        ...panelState(),
+        host: parsed.host,
+        // The config layer wins at boot, so say so instead of letting the next restart
+        // silently undo what the panel just saved.
+        warning: wasFromConfig ? '配置里的 endpoint 不为空，重启后仍以配置为准；要长期用这条，请把配置里的 endpoint 清空。' : '',
+      })
     }
     return panelFail(`unknown action ${action}`)
   }
@@ -1117,6 +1150,77 @@ export function apply(ctx, config = {}) {
     state.lastError = `no endpoint: set it in the profile patch, or write it to ${join(stateDir, 'endpoint')}`
   }
 
+  // ── Changing the address from the panel ────────────────────────────────────
+  //
+  // Whoever holds the address holds the identity: the plugin serves DSH's tools to
+  // whoever accepts that connection. So the panel may only point it at the XiaoZhi
+  // service unless the profile explicitly says otherwise, and the token is never sent
+  // back to the browser — the field is write-only.
+
+  function parseEndpoint(raw) {
+    const text = String(raw ?? '').trim()
+    if (text === '') throw new Error('地址是空的。')
+    let parsed
+    try {
+      parsed = new URL(text)
+    } catch {
+      throw new Error('这不是一个合法的 URL。')
+    }
+    if (parsed.protocol !== 'wss:' && parsed.protocol !== 'ws:') throw new Error('地址必须 wss:// 开头（本机调试可以用 ws://）。')
+    if (settings.endpointPolicy === 'xiaozhi' && parsed.hostname !== 'api.xiaozhi.me') {
+      throw new Error(`只接受 api.xiaozhi.me 的接入点。自建服务端请先在配置里写 endpointPolicy: any，再改地址。`)
+    }
+    if (parsed.searchParams.get('token') === null || parsed.searchParams.get('token') === '') {
+      throw new Error('地址里没有 token= 参数——请把控制台给的那一整条粘进来。')
+    }
+    return { url: text, host: parsed.hostname }
+  }
+
+  async function writeEndpointFile(url) {
+    const file = join(stateDir, 'endpoint')
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(file, `# 小智 MCP 接入点（面板写入；只在本机）\n${url}\n`, { mode: 0o600 })
+    try {
+      await chmod(file, 0o600)
+    } catch {
+      /* Windows: the profile folder is the boundary, not the mode bits */
+    }
+  }
+
+  // Drop the current socket and dial again now, instead of waiting out the backoff.
+  function restartSocket() {
+    if (state.retryTimer !== undefined) {
+      clearTimeout(state.retryTimer)
+      state.retryTimer = undefined
+    }
+    const old = state.socket
+    state.socket = undefined // so the close handler does not schedule a second dial
+    if (old !== undefined) {
+      try {
+        old.close()
+      } catch {
+        /* already gone */
+      }
+    }
+    state.connected = false
+    state.ready = false
+    state.attempts = 0
+    connect()
+  }
+
+  function waitConnected(ms) {
+    if (state.connected) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const until = Date.now() + ms
+      const probe = () => {
+        if (state.connected) return resolve(true)
+        if (Date.now() >= until || state.disposed) return resolve(false)
+        setTimeout(probe, 150).unref?.()
+      }
+      setTimeout(probe, 150).unref?.()
+    })
+  }
+
   // One socket at a time. The endpoint accepts a single connection per token, so a
   // reconnect always happens after the previous socket reported `close`; every handler
   // checks `state.socket === socket` so a late event from a dead socket cannot win.
@@ -1473,6 +1577,7 @@ function readSettings(config) {
     approvals: ['off', 'always', 'auto'].includes(config.approvals) ? config.approvals : 'auto',
     questions: ['off', 'always', 'auto'].includes(config.questions) ? config.questions : 'auto',
     uiControl: ['off', 'confirm', 'all'].includes(config.uiControl) ? config.uiControl : 'confirm',
+    endpointPolicy: config.endpointPolicy === 'any' ? 'any' : 'xiaozhi',
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(1000, Number(config.approvalGraceMs)) : 20_000,
     voiceWindowMs: Number.isFinite(config.voiceWindowMs) ? Math.max(60_000, Number(config.voiceWindowMs)) : 30 * 60_000,
     reconnectMinMs: Number.isFinite(config.reconnectMinMs) ? Number(config.reconnectMinMs) : 1000,

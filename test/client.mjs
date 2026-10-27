@@ -128,12 +128,23 @@ layout.panel = undefined
 bar.props.onClick()
 check('clicking the bar opens the panel', layout.panel === 'xiaozhi', String(layout.panel))
 
-const panel = registered[1].component({})
+// A function component is not rendered by createElement; expand them so the tree can be
+// read (and clicked) the way React would.
+const render = (node) => {
+  if (node === null || node === undefined || typeof node === 'boolean' || typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(render)
+  if (typeof node === 'object' && typeof node.type === 'function') return render(node.type(node.props))
+  if (typeof node === 'object') return { ...node, children: (node.children ?? []).map(render) }
+  return node
+}
+
+const panel = render(registered[1].component({}))
 const panelText = textOf(panel)
 check('the panel has a title', panelText.includes('小智语音桥接'), panelText)
 check('the panel lists both waiting sections', panelText.includes('等你批准') && panelText.includes('等你回答'), panelText)
 check('the panel explains where config lives', panelText.includes('cordis.patch.yml'), panelText)
 check('the panel shows the live status', panelText.includes('已连接') && panelText.includes('2024-11-05'), panelText)
+check('the panel can change the address', panelText.includes('接入点') && panelText.includes('保存并重连') && panelText.includes('token 不回显'), panelText)
 
 // The recent list is the panel's own way to switch sessions: a click goes straight to
 // the shell, with no confirmation and no poll delay.

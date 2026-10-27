@@ -257,6 +257,58 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // ── the access point: write-only, because the token is the identity ──────
+
+    function EndpointForm({ data, reload }) {
+      const [value, setValue] = React.useState('')
+      const [notice, setNotice] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const save = async () => {
+        const endpoint = value.trim()
+        if (endpoint === '') {
+          setNotice('先把控制台给的那一整条地址粘进来。')
+          return
+        }
+        setBusy(true)
+        setNotice('正在切换…')
+        try {
+          const next = await host('set_endpoint', { endpoint })
+          setValue('')
+          if (next.warning !== '' && next.warning !== undefined) setNotice(next.warning)
+          else if (next.connected === true) setNotice(`已切到 ${next.host}，连接正常。`)
+          else setNotice(`已保存 ${next.host}，但还没连上：${next.lastError || '未知原因'}`)
+          reload()
+        } catch (failure) {
+          setNotice(String(failure?.message ?? failure))
+        } finally {
+          setBusy(false)
+        }
+      }
+      const current = data?.endpointHost !== undefined && data.endpointHost !== ''
+        ? `${data.endpointHost}（来源 ${data.endpointSource || '未知'}）`
+        : '未配置'
+      return h('div', { style: card },
+        h('div', { style: row },
+          h('strong', null, '接入点'),
+          h('span', { style: muted }, ` · 当前 ${current} · token 不回显`),
+        ),
+        h('div', { style: { ...row, marginTop: 8 } },
+          h('input', {
+            style: input,
+            value,
+            type: 'password',
+            placeholder: '粘贴 wss://…?token=… 整条地址',
+            onChange: (event) => setValue(event.target.value),
+            onKeyDown: (event) => { if (event.key === 'Enter') void save() },
+          }),
+          h('button', { style: button, disabled: busy, onClick: () => void save() }, '保存并重连'),
+        ),
+        notice === ''
+          ? h('div', { style: { ...muted, fontSize: 12, marginTop: 6 } }, '只接受 api.xiaozhi.me 的接入点（自建服务端需在配置里写 endpointPolicy: any）。改的是本机 ~/.dsh/xiaozhi/endpoint。')
+          : h('div', { style: { fontSize: 12, marginTop: 6 } }, notice),
+      )
+    }
+
     // ── the panel: status, pending work, and the buttons ─────────────────────
 
     function makePanel(ctx) {
@@ -280,9 +332,11 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('p', { style: { ...muted, fontSize: 12, margin: '6px 0 0' } },
-            '这一页读取宿主里的桥接状态；改配置请编辑 cordis.patch.yml 或 ~/.dsh/xiaozhi/endpoint，然后重启 DSH。'),
+            '这一页读取宿主里的桥接状态；地址可以在下面直接改，其余配置请编辑 cordis.patch.yml 后重启 DSH。'),
 
           error === '' ? null : h('div', { style: { ...card, color: 'var(--dsw-danger, #d1242f)' } }, error),
+
+          h(EndpointForm, { data, reload: load }),
 
           data === null
             ? h('p', { style: muted }, '读取中…')
