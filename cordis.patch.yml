@@ -1,0 +1,27 @@
+# Bundle patch: mounts the XiaoZhi bridge into whatever profile lists this bundle.
+#
+# The endpoint is deliberately empty here: it carries the access-point token from the
+# 小智 console, and a token does not belong in a repository. With it empty the plugin
+# reads ~/.dsh/xiaozhi/endpoint (one line, `#` comments allowed) — see
+# cordis.local.example.yml and docs/接入手册.md §3. Filling it in here also works; the
+# config value wins over the file.
+- insert:
+    - id: xiaozhi
+      name: dsh-xiaozhi
+      config:
+        # wss://api.xiaozhi.me/mcp/?token=…  —— 小智控制台 → 智能体 → MCP 接入点
+        # 空 = 去 ~/.dsh/xiaozhi/endpoint 读；那里也没有就不连接，只写状态文件
+        endpoint: ""
+        # false 只读：只允许看状态/会话/对话，不允许发消息、停止、批审批、开新会话
+        allowControl: true
+
+        # 审批与提问怎么走：
+        #   auto   —— 只在「最近用语音驱动过 DSH」的时间窗里先问语音；平时不打扰 DSH 自己的卡片
+        #   always —— 总是先问语音
+        #   off    —— 完全不接管（提问仍保留「超时后补答」）
+        approvals: auto
+        questions: auto
+        # 等语音回答多久；超时就把请求交回 DSH 的卡片（审批卡 / 问题卡），不会丢
+        approvalGraceMs: 20000
+        # 语音「算数」的时间窗：最近这么久内用语音动过 DSH（或这个会话），才先问语音
+        voiceWindowMs: 1800000

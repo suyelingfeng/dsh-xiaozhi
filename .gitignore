@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+*.tgz
+
+# 本机临时目录（测试用的假 DSH_HOME、从 asar 里扒出来的参考源码）
+.test-home/
+.scratch/
+
+# 本机配置（可能含接入点 token）
+cordis.local.yml
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

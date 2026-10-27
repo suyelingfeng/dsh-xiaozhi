@@ -1,0 +1,20 @@
+# 把这份内容合并进 ~/.dsh/profiles/desktop/cordis.patch.yml（profile 自己的补丁层）。
+#
+# 地址（含 token）有两种放法，任选一种：
+#
+#   方式 A（推荐）：地址放 ~/.dsh/xiaozhi/endpoint，一行一条。下面 endpoint 留空，
+#                  插件启动时自己去读，YAML 里就不留凭据。
+#   方式 B：直接把 endpoint 写在这里（整条 wss://…?token=…）。
+#                  配了就优先用配置，不再读文件。
+#
+# 注意：profile 层的 config 会**整条替换** bundle 层那一条的 config，所以其余字段要写全。
+# 改完重启 DSH。
+- id: xiaozhi
+  name: dsh-xiaozhi
+  config:
+    endpoint: ""     # ← 方式 A 留空；方式 B 填 "wss://api.xiaozhi.me/mcp/?token=…"
+    allowControl: true
+    approvals: auto
+    questions: auto
+    approvalGraceMs: 20000
+    voiceWindowMs: 1800000
