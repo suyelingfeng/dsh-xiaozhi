@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: syntax
+        run: |
+          node --check index.js
+          node --check test/harness.mjs
+          node --check test/live.mjs
+
+      - name: offline tests
+        # 46 assertions with a fake WebSocket and a fake ctx: no DSH, no network.
+        run: node test/harness.mjs
+
+  secrets:
+    name: no access-point token in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: scan for a JWT-shaped string
+        # 接入点地址里带一个签名 JWT，它只该住在 ~/.dsh/xiaozhi/endpoint。
+        # 这里只匹配「两段 eyJ… 用点分隔」的真实 JWT，不会误报文档里的占位符。
+        run: |
+          if grep -rInE 'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}' \
+               --exclude-dir=.git --exclude-dir=node_modules .; then
+            echo "::error::a JWT-shaped string is committed; move the access point to ~/.dsh/xiaozhi/endpoint"
+            exit 1
+          fi
+          echo "clean"
