@@ -122,6 +122,8 @@ IPC 桥接），不额外开端口、不额外认证。
     questions: auto           # auto | always | off（off 仍有超时补答）
     approvalGraceMs: 20000    # 等语音回答多久，超时就交回卡片
     voiceWindowMs: 1800000    # 语音「算数」的时间窗
+    uiControl: confirm        # confirm 切会话要确认 | all 直接切 | off 全关
+    endpointPolicy: xiaozhi   # 面板改地址只认 api.xiaozhi.me | any 放开
 ```
 
 地址（就是 token）不进仓库、也不建议留在 YAML 里：写进 `~/.dsh/xiaozhi/endpoint`，
@@ -131,13 +133,24 @@ IPC 桥接），不额外开端口、不额外认证。
 ## 开发
 
 ```sh
-node test/harness.mjs    # 离线自测：假 WebSocket + 假 ctx，45 项断言，不联网
+node test/harness.mjs    # 宿主侧：假 WebSocket + 假 ctx，71 项断言，不联网
+node test/client.mjs     # 浏览器侧：桩 React + 桩 fetch，20 项断言
 node test/live.mjs       # 联调：连真实接入点打印每一帧，46 秒后自己退出（会占用唯一连接）
 ```
 
-- `test/harness.mjs` 把 `globalThis.WebSocket` 换成假的、用假 `ctx` 演 DSH，
-  覆盖 MCP 方法、11 个工具、审批/提问的接管与交还。
+- `test/harness.mjs` 覆盖 MCP 方法、14 个工具、审批/提问的接管与交还、面板路由与界面命令队列；
+- `test/client.mjs` 用 vm 加载 `client.js`，验证两个座位、渲染、命令执行与 ack；
 - 想只测协议不看 DSH：`test/live.mjs` 跑完记得让它退出，否则它占着接入点。
+
+### 发版
+
+```sh
+# 1. 版本号三处一起跳：package.json、index.js 的 VERSION、CHANGELOG.md 顶部
+git tag -a v0.5.1 -m "…" && git push origin v0.5.1
+
+# 2. 用这个 tag 建 Release，说明直接取自 CHANGELOG 那一节（token 只从环境变量读）
+GITHUB_TOKEN=<有 repo 权限的 token> node scripts/publish-release.mjs v0.5.1
+```
 
 ## 边界
 

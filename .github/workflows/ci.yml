@@ -35,6 +35,7 @@ jobs:
           node --check test/harness.mjs
           node --check test/client.mjs
           node --check test/live.mjs
+          node --check scripts/publish-release.mjs
 
       - name: offline tests
         # 56 host assertions with a fake WebSocket and a fake ctx, plus 13 that load the
