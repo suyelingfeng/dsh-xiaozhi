@@ -31,12 +31,17 @@ jobs:
       - name: syntax
         run: |
           node --check index.js
+          node --check client.js
           node --check test/harness.mjs
+          node --check test/client.mjs
           node --check test/live.mjs
 
       - name: offline tests
-        # 46 assertions with a fake WebSocket and a fake ctx: no DSH, no network.
-        run: node test/harness.mjs
+        # 56 host assertions with a fake WebSocket and a fake ctx, plus 13 that load the
+        # browser bundle against a stub React. No DSH, no network, no credentials.
+        run: |
+          node test/harness.mjs
+          node test/client.mjs
 
   secrets:
     name: no access-point token in the tree

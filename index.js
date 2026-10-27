@@ -30,7 +30,7 @@ import { join } from 'node:path'
 export const name = 'dsh-xiaozhi'
 export const inject = ['sessionController']
 
-const VERSION = '0.2.1'
+const VERSION = '0.2.2'
 const DEFAULT_PROTOCOL = '2024-11-05'
 const KEEP_SESSIONS_MS = 5000
 const SNAPSHOT_MS = 10_000
@@ -569,6 +569,86 @@ export function apply(ctx, config = {}) {
     }
 
     throw new Error('没有对上任何待处理的事；先用 dsh_pending 看看现在有什么。')
+  }
+
+  // ── The panel: one POST route the client half reads and writes ──────────────
+  //
+  // Same channel as the GUI's own API: a cookie-authenticated fetch on /api, which the
+  // desktop shell carries over its IPC bridge. The client half calls it with a relative
+  // URL; nothing here is reachable without that browser session.
+
+  function panelState() {
+    return {
+      version: VERSION,
+      pid: process.pid,
+      connected: state.connected,
+      ready: state.ready,
+      protocol: state.protocol,
+      reconnects: state.reconnects,
+      lastError: state.lastError,
+      endpointSource: state.endpointSource,
+      calls: state.calls,
+      sessions: state.sessions.length,
+      active: state.active,
+      approvals: [...state.approvals.values()]
+        .filter((entry) => entry.answer !== undefined)
+        .map((entry) => ({ id: entry.id.slice(0, 8), tool: entry.tool, reason: entry.reason, session: entry.sessionId })),
+      questions: [...state.questions.values()]
+        .filter((entry) => entry.answer !== undefined)
+        .map((entry) => ({
+          id: entry.id.slice(0, 8),
+          asks: entry.questions.map((question) => ({
+            id: question.id,
+            question: question.question,
+            options: (Array.isArray(question.options) ? question.options : []).map((option) => String(option?.label ?? '')),
+          })),
+        })),
+    }
+  }
+
+  const panelOk = (value) => ({ ok: true, value })
+  const panelFail = (message, code = 'xiaozhi/invalid') => ({ ok: false, error: { code, message } })
+
+  async function panelCommand(body) {
+    const action = String(body?.action ?? '')
+    if (action === 'state') return panelOk(panelState())
+    if (!settings.allowControl) return panelFail('只读模式：配置里 allowControl 为 false', 'xiaozhi/read-only')
+    const wanted = String(body?.id ?? '').trim().toLowerCase()
+    if (action === 'allow' || action === 'reject') {
+      const entry = [...state.approvals.values()].find((item) => item.answer !== undefined && item.id.startsWith(wanted))
+      if (entry === undefined) return panelFail('这条审批已经不在等你了', 'xiaozhi/stale')
+      entry.answer(action === 'allow' ? 'allow' : 'reject')
+      return panelOk(panelState())
+    }
+    if (action === 'answer') {
+      const entry = [...state.questions.values()].find((item) => item.answer !== undefined && item.id.startsWith(wanted))
+      if (entry === undefined) return panelFail('这个问题已经不在等你了', 'xiaozhi/stale')
+      let batch
+      try {
+        batch = answerBatchFor(entry.questions, { text: body?.text, answers: body?.answers })
+      } catch (error) {
+        return panelFail(String(error?.message ?? error))
+      }
+      entry.answer(batch)
+      return panelOk(panelState())
+    }
+    if (action === 'reconnect') {
+      if (state.socket !== undefined) {
+        try {
+          state.socket.close()
+        } catch {
+          /* already gone */
+        }
+      } else {
+        connect()
+      }
+      return panelOk(panelState())
+    }
+    if (action === 'refresh') {
+      void listSessions(true).catch(() => {})
+      return panelOk(panelState())
+    }
+    return panelFail(`unknown action ${action}`)
   }
 
   async function jobsText(args) {
@@ -1153,6 +1233,32 @@ export function apply(ctx, config = {}) {
       }, { once: true })
     })
   }, { prepend: true })
+
+  // One POST route for the browser half. `connection.fetch` is the same bridge the GUI's
+  // own API uses, so the request arrives already authenticated by the page's cookie; a
+  // host without it (a headless profile, say) simply has no panel.
+  ctx.effect(() => {
+    const connection = ctx.get?.('connection')
+    if (connection === undefined || connection === null || typeof connection.fetch?.register !== 'function') {
+      log.warn('no connection.fetch: the panel route is not served')
+      return () => {}
+    }
+    return connection.fetch.register({
+      path: '/api/xiaozhi',
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: async (request) => {
+        let body = {}
+        try {
+          body = await request.json()
+        } catch {
+          body = {}
+        }
+        const result = await panelCommand(body)
+        return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } })
+      },
+    })
+  }, 'dsh-xiaozhi: panel route')
 
   ctx.effect(() => {
     // The snapshot keeps the Session list warm, so a voice question does not wait for

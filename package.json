@@ -1,16 +1,18 @@
 {
   "name": "dsh-xiaozhi",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Bridge DeepSeek Harness to a XiaoZhi (小智) MCP endpoint over WebSocket: 小智 can read DSH conversations and control what DSH is doing",
   "license": "Apache-2.0",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
     "cordis.local.example.yml",
     "README.md",
@@ -19,9 +21,9 @@
     "docs/"
   ],
   "scripts": {
-    "test": "node test/harness.mjs",
+    "test": "node test/harness.mjs && node test/client.mjs",
     "test:live": "node test/live.mjs",
-    "check": "node --check index.js"
+    "check": "node --check index.js && node --check client.js"
   },
   "keywords": [
     "dsh-plugin",
@@ -37,6 +39,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   }
 }

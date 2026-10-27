@@ -44,6 +44,7 @@ const projectionState = {
   session: { seq: 9 },
   view: { questions: { active: [], settled: [] } },
 }
+const routes = []
 const ctx = {
   logger: () => ({ info: never, warn: never }),
   on(type, fn) {
@@ -54,6 +55,9 @@ const ctx = {
   effect(fn) { fn() },
   get(name) {
     if (name === 'jobs') return { list: async () => jobs, kill(id, owner, reason) { ctx.killed = { id, owner, reason } } }
+    if (name === 'connection') {
+      return { fetch: { register: (route) => { routes.push(route); return () => {} } } }
+    }
     if (name === 'sessionProjections') {
       return { stateOf: (session, key) => (key === 'userQuestions' ? projectionState.view : undefined) }
     }
@@ -251,6 +255,52 @@ writeFileSync(join(process.env.DSH_HOME, 'xiaozhi', 'endpoint'), '# 注释行会
 plugin.apply({ ...ctx, sessionController: ctx.sessionController }, { allowControl: true })
 await tick()
 check('the endpoint falls back to the local file', FakeSocket.last?.url === 'wss://example.test/mcp/?token=from-file', FakeSocket.last?.url)
+
+// ── the panel route (the first instance is the connected one) ────────────────
+
+check('the panel route is registered on /api', routes[0]?.path === '/api/xiaozhi' && routes[0]?.methods?.[0] === 'POST', JSON.stringify(routes[0]?.path))
+
+const panel = async (body) => {
+  const response = await routes[0].fetch(new Request('http://localhost/api/xiaozhi', { method: 'POST', body: JSON.stringify(body) }))
+  return response.json()
+}
+
+const overview = await panel({ action: 'state' })
+check('panel state describes the bridge', overview.ok === true && overview.value.connected === true && overview.value.version === '0.2.2', JSON.stringify(overview.value ?? overview).slice(0, 160))
+check('panel state counts sessions', overview.value?.sessions === 2, String(overview.value?.sessions))
+
+const heldApproval = approveHandler(
+  { agent: { id: 'session-a' }, toolName: 'write_file', reason: 'write build/out.txt' },
+  async () => 'allowed-once',
+)
+const withApproval = await panel({ action: 'state' })
+const approvalId = withApproval.value?.approvals?.[0]?.id
+check('panel lists a waiting approval', typeof approvalId === 'string' && withApproval.value.approvals[0].tool === 'write_file', JSON.stringify(withApproval.value?.approvals))
+const allowedByPanel = await panel({ action: 'allow', id: approvalId })
+check('panel allow settles the approval', (await heldApproval) === 'allowed-once' && allowedByPanel.ok === true, JSON.stringify(allowedByPanel.error ?? allowedByPanel))
+
+const heldQuestion = questionHandler(
+  {
+    agent: { id: 'session-a', session: { seq: 9 } },
+    questions: [{ id: 'q9', question: '用哪个端口？', options: [{ label: '8080' }, { label: '9090' }] }],
+    wait: { callId: 'call-q9', timed: true },
+  },
+  async () => ({ answers: [{ id: 'q9', selected: [] }] }),
+)
+const withQuestion2 = await panel({ action: 'state' })
+const questionId = withQuestion2.value?.questions?.[0]?.id
+check('panel lists a waiting question with its options', withQuestion2.value?.questions?.[0]?.asks?.[0]?.options?.includes('9090') === true, JSON.stringify(withQuestion2.value?.questions))
+const answeredByPanel = await panel({ action: 'answer', id: questionId, text: '9090' })
+check('panel answers the question', (await heldQuestion).answers[0].selected[0] === '9090' && answeredByPanel.ok === true, JSON.stringify(answeredByPanel.error ?? answeredByPanel))
+
+const stale = await panel({ action: 'allow', id: 'nosuch' })
+check('panel refuses a stale id', stale.ok === false && stale.error?.code === 'xiaozhi/stale', JSON.stringify(stale))
+
+const unknown = await panel({ action: 'nope' })
+check('panel refuses an unknown action', unknown.ok === false, JSON.stringify(unknown))
+
+const reconnect = await panel({ action: 'reconnect' })
+check('panel reconnect is accepted', reconnect.ok === true, JSON.stringify(reconnect.error ?? ''))
 
 const failed = results.filter((result) => !result.ok)
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`)
